@@ -51,13 +51,30 @@ ggplot(trajdf) +
 datseg <- dat %>% 
   left_join(trajdf %>% 
               dplyr::select(doy, R2n, season)) %>% 
-  mutate(season=ifelse(is.na(season), "breed", season))
+  mutate(season=ifelse(is.na(season), "breed", season),
+         R2n=ifelse(is.na(R2n), 0, R2n),
+         RTC.time=hms(RTC.time),
+         hour=hour(RTC.time))
 
 #Write out
 write.csv(datseg, "/Users/ellyknight/Documents/UoA/Projects/Projects/MCP2/Analysis/Data/PinPoint2217_NSDsegmented.csv", row.names = FALSE)
 
 #STEP 2. SEGMENT STOPOVER FROM MIGRATION FOR DAILY POINTS####
 
+#Visualize elevation data to determine whether it has the potential to inform segmentation
+ggplot(datseg) +
+  geom_point(aes(x=Index, y=R2n, colour=log(Altitude))) +
+  scale_colour_viridis_c()
+
+ggplot(datseg) +
+  geom_violin(aes(x=season, y=Altitude)) +
+  geom_jitter(aes(x=season, y=Altitude, colour=hour)) +
+  facet_wrap(~season, scales="free") +
+  scale_colour_viridis_c()
+
+ #2a. Fall migration----
+
+#2b. Spring migration----
 
 #STEP 3. SEGMENT FORAGING FROM ROOSTING FROM MIGRATION FOR BURST POINTS####
 #Do this separately for each season?
