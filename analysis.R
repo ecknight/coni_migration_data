@@ -10,8 +10,7 @@ options(scipen = 999)
 
 #Load in raw data & filter out pts without enough satellite
 dat <- read.csv("PinPoint 2217 2019-07-10 11-21-47.csv") %>% 
-  dplyr::filter(Status=="Valid") %>% 
-  mutate(doy=yday(ymd(RTC.date)))
+  dplyr::filter(Status=="Valid")
 
 #Wrangle for as.traj function. Note filtered to just one point per day
 locs <- dat %>% 
@@ -32,37 +31,29 @@ traj <- as.ltraj(xy=locs[,c("Longitude", "Latitude")],
 traj
 head(traj[[1]])
 
-#Join back to dataframe and segment
-trajdf <- as.data.frame(traj[[1]]) %>% 
-  mutate(date=as_date(date),
-         doy=yday(date),
-         index=row_number(),
-         season=case_when(R2n<1 ~ "breed",
-                          R2n>8355 ~ "winter",
-                          R2n>1 & R2n<8355 & year(date)==2018 ~ "fallmig",
-                          R2n>1 & R2n<8355 & year(date)==2019 ~ "springmig"))
-
-#Check segmentation
-table(trajdf$season)
-
-#Visualize
-ggplot(trajdf) +
-  geom_line(aes(x=index, y=R2n)) +
-  geom_point(aes(x=index, y=R2n, colour=season))
-#Some funnyness in winter classifications
-
 #Segment per location for wintering grounds instead
-trajdf <- as.data.frame(traj[[1]]) %>% 
-  mutate(date=as_date(date),
-         doy=yday(date),
-         index=row_number(),
-         season=case_when(R2n<1 ~ "breed",
+datseg <- dat %>% 
+  left_join(as.data.frame(traj[[1]]) %>%
+              mutate(date=as_date(date),
+                     doy=yday(date),
+                     index=row_number()) %>% 
+              dplyr::rename(Longitude=x, Latitude=y)) %>% 
+  mutate(season=case_when(R2n<1 ~ "breed",
                           Longitude > -53.33 ~ "winter",
                           R2n>1 & Longitude < -53.33 & year(date)==2018 ~ "fallmig",
-                          R2n>1 & Longitude < -53.3 & year(date)==2019 ~ "springmig"))
+                          R2n>1 & Longitude < -53.3 & year(date)==2019 ~ "springmig"),
+         season=ifelse(is.na(season), "breed", season),
+         R2n=ifelse(is.na(R2n), 0, R2n),
+         time=hms(RTC.time),
+         hour=hour(time))
 
-#Join back to full datset
-datseg <- 
+#Check segmentation
+table(datseg$season)
+
+#Visualize
+ggplot(datseg) +
+  geom_line(aes(x=index, y=R2n)) +
+  geom_point(aes(x=index, y=R2n, colour=season))
 
 #Write out
 write.csv(datseg, "PinPoint2217_NSDsegmented.csv", row.names = FALSE)
