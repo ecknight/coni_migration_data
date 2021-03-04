@@ -1,6 +1,8 @@
 library(tidyverse)
 library(lubridate)
 library(adehabitatLT)
+library(bayesmove)
+library(move)
 
 options(scipen = 999)
 
@@ -30,7 +32,7 @@ traj <- as.ltraj(xy=locs[,c("Longitude", "Latitude")],
 traj
 head(traj[[1]])
 
-#Segment as per NSD
+#Join back to dataframe and segment
 trajdf <- as.data.frame(traj[[1]]) %>% 
   mutate(date=as_date(date),
          doy=yday(date),
@@ -39,27 +41,37 @@ trajdf <- as.data.frame(traj[[1]]) %>%
                           R2n>8355 ~ "winter",
                           R2n>1 & R2n<8355 & year(date)==2018 ~ "fallmig",
                           R2n>1 & R2n<8355 & year(date)==2019 ~ "springmig"))
+
 #Check segmentation
 table(trajdf$season)
 
 #Visualize
 ggplot(trajdf) +
   geom_line(aes(x=index, y=R2n)) +
-  geom_point(aes(x=index, y=R2n))
+  geom_point(aes(x=index, y=R2n, colour=season))
+#Some funnyness in winter classifications
+
+#Segment per location for wintering grounds instead
+trajdf <- as.data.frame(traj[[1]]) %>% 
+  mutate(date=as_date(date),
+         doy=yday(date),
+         index=row_number(),
+         season=case_when(R2n<1 ~ "breed",
+                          Longitude > -53.33 ~ "winter",
+                          R2n>1 & Longitude < -53.33 & year(date)==2018 ~ "fallmig",
+                          R2n>1 & Longitude < -53.3 & year(date)==2019 ~ "springmig"))
 
 #Join back to full datset
-datseg <- dat %>% 
-  left_join(trajdf %>% 
-              dplyr::select(doy, R2n, season)) %>% 
-  mutate(season=ifelse(is.na(season), "breed", season),
-         R2n=ifelse(is.na(R2n), 0, R2n),
-         RTC.time=hms(RTC.time),
-         hour=hour(RTC.time))
+datseg <- 
 
 #Write out
-write.csv(datseg, "/Users/ellyknight/Documents/UoA/Projects/Projects/MCP2/Analysis/Data/PinPoint2217_NSDsegmented.csv", row.names = FALSE)
+write.csv(datseg, "PinPoint2217_NSDsegmented.csv", row.names = FALSE)
 
 #STEP 2. SEGMENT STOPOVER FROM MIGRATION FOR DAILY POINTS####
+
+datmig <- datseg %>% 
+  filter(hour==15,
+         season %in% c("fallmig", "springmig"))
 
 #Visualize elevation data to determine whether it has the potential to inform segmentation
 ggplot(datseg) +
@@ -71,6 +83,9 @@ ggplot(datseg) +
   geom_jitter(aes(x=season, y=Altitude, colour=hour)) +
   facet_wrap(~season, scales="free") +
   scale_colour_viridis_c()
+
+#Yes, especially for winter. Explore bayesmove instead of HMMs
+#Try observation level segmentation instead of using foiegras and then segmenting
 
  #2a. Fall migration----
 
