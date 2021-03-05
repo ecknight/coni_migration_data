@@ -4,13 +4,55 @@
 
 #remotes::install_github("joshcullen/bayesmove")
 
+#PREAMBLE####
+
 library(tidyverse) #for data wrangling
 library(lubridate) #for date manipulation
 library(adehabitatLT) #for NSD calculation
 library(bayesmove) #for behavioural segmentation
 library(sf) #for gis
+library(furrr) #for segmentation in bayesmove
+library(purrr) #for segmentation in bayesmove
 
 options(scipen = 999)
+
+
+#Get background map data
+whemi <- map_data("world", region=c("Canada", 
+                                    "USA", 
+                                    "Mexico",
+                                    "Guatemala", 
+                                    "Belize", 
+                                    "El Salvador",
+                                    "Honduras", 
+                                    "Nicaragua", 
+                                    "Costa Rica",
+                                    "Panama", 
+                                    "Jamaica", 
+                                    "Cuba", 
+                                    "The Bahamas",
+                                    "Haiti", 
+                                    "Dominican Republic", 
+                                    "Antigua and Barbuda",
+                                    "Dominica", 
+                                    "Saint Lucia", 
+                                    "Saint Vincent and the Grenadines", 
+                                    "Barbados",
+                                    "Grenada",
+                                    "Trinidad and Tobago",
+                                    "Colombia",
+                                    "Venezuela",
+                                    "Guyana",
+                                    "Suriname",
+                                    "Ecuador",
+                                    "Peru",
+                                    "Brazil",
+                                    "Bolivia",
+                                    "Paraguay",
+                                    "Chile",
+                                    "Argentina",
+                                    "Uruguay")) %>% 
+  dplyr::filter(!group%in%c(258:264))
 
 #STEP 1. SEGMENT BY SEASON USING NET-SQUARED DISPLACEMENT####
 
@@ -109,7 +151,7 @@ discretefall<- discrete_move_var(filterfall, lims = list(dist.bin.lims, angle.bi
 # Only retain id and discretized step length (SL), turning angle (TA)
 inputfall <- subset(discretefall, select = c(id, SL, TA))
 
-#2aii. Segmentation----
+#2aii. Classification----
 
 set.seed(1)
 
@@ -174,44 +216,6 @@ statesfall <- discretefall %>%
 
 
 #Plot output
-
-#Get background map data
-whemi <- map_data("world", region=c("Canada", 
-                                    "USA", 
-                                    "Mexico",
-                                    "Guatemala", 
-                                    "Belize", 
-                                    "El Salvador",
-                                    "Honduras", 
-                                    "Nicaragua", 
-                                    "Costa Rica",
-                                    "Panama", 
-                                    "Jamaica", 
-                                    "Cuba", 
-                                    "The Bahamas",
-                                    "Haiti", 
-                                    "Dominican Republic", 
-                                    "Antigua and Barbuda",
-                                    "Dominica", 
-                                    "Saint Lucia", 
-                                    "Saint Vincent and the Grenadines", 
-                                    "Barbados",
-                                    "Grenada",
-                                    "Trinidad and Tobago",
-                                    "Colombia",
-                                    "Venezuela",
-                                    "Guyana",
-                                    "Suriname",
-                                    "Ecuador",
-                                    "Peru",
-                                    "Brazil",
-                                    "Bolivia",
-                                    "Paraguay",
-                                    "Chile",
-                                    "Argentina",
-                                    "Uruguay")) %>% 
-  dplyr::filter(!group%in%c(258:264))
-
 ggplot() +
   geom_polygon(data=whemi, aes(x=long, y=lat, group=group), colour = "gray85", fill = "gray75", size=0.3) +
   geom_path(data = statesfall, aes(x=X, y=Y), color="gray60", size=0.25) +
@@ -267,7 +271,7 @@ discretespring<- discrete_move_var(filterspring, lims = list(dist.bin.lims, angl
 # Only retain id and discretized step length (SL), turning angle (TA)
 inputspring <- subset(discretespring, select = c(id, SL, TA))
 
-#2bii. Segmentation----
+#2bii. Classification----
 
 set.seed(1)
 
@@ -349,6 +353,60 @@ ggplot() +
 #https://joshcullen.github.io/bayesmove/articles/Segment-the-tracks.html
 #https://joshcullen.github.io/bayesmove/articles/Prepare-data-for-analysis.html
 #https://joshcullen.github.io/bayesmove/articles/Cluster-track-segments.html
+
+#2a. Fall migration----
+
+#Run step 2bi above first
+
+#2aii. Segmentation----
+
+inputlistfall <-  df_to_list(dat = inputfall, ind = "id")
+
+set.seed(1)
+
+# Define hyperparameter for prior distribution
+alpha<- 1
+# Set number of iterations for the Gibbs sampler
+ngibbs<- 10000
+# Set the number of bins used to discretize each data stream
+nbins<- c(5,8)
+
+future::plan(multisession)  #run all MCMC chains in parallel
+#refer to future::plan() for more details
+dat.res <- segment_behavior(data = inputlistfall, ngibbs = ngibbs, nbins = nbins,
+                           alpha = alpha)
+
+# Trace-plots for the number of breakpoints per ID
+traceplot(data = dat.res$nbrks, ngibbs = ngibbs, type = "nbrks")
+
+# Trace-plots for the log marginal likelihood (LML) per ID
+traceplot(data = dat.res$LML, ngibbs = ngibbs, type = "LML")
+
+# Determine MAP for selecting breakpoints
+MAP.est<- get_MAP(dat = dat.res$LML, nburn = 5000)
+MAP.est
+
+brkpts<- get_breakpts(dat = dat.res$brkpts, MAP.est = MAP.est)
+
+# How many breakpoints estimated per ID?
+apply(brkpts[,-1], 1, function(x) length(purrr::discard(x, is.na)))
+
+# Plot breakpoints over the data
+discretelistfall<- df_to_list(dat = discretefall, ind = "id")
+
+plot_breakpoints(data = discretelistfall, as_date = FALSE, var_names = c("step","angle"),
+                 var_labels = c("Step Length (km)", "Turning Angle (rad)"), brkpts = brkpts)
+
+#This is not looking super useful. Seems like step length might be the only informative variable. Should consider removing turning angle.
+
+# Assign track segments to all observations by ID
+segfall<- assign_tseg(dat = discretelistfall, brkpts = brkpts)
+
+head(tracks.seg)
+
+
+#2aiii. Classification----
+
 
 #STEP 3. SEGMENT FORAGING FROM ROOSTING FROM MIGRATION FOR BURST POINTS####
 
