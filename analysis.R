@@ -8,7 +8,6 @@ library(tidyverse) #for data wrangling
 library(lubridate) #for date manipulation
 library(adehabitatLT) #for NSD calculation
 library(bayesmove) #for behavioural segmentation
-library(move) #with bayesmove
 library(sf) #for gis
 
 options(scipen = 999)
@@ -65,22 +64,8 @@ ggplot(datseg) +
 #Write out
 write.csv(datseg, "PinPoint2217_NSDsegmented.csv", row.names = FALSE)
 
-#STEP 2. SEGMENT STOPOVER FROM MIGRATION FOR DAILY POINTS####
+#STEP 2. SEGMENT STOPOVER FROM MIGRATION - BAYESMOVE - POINT LEVEL####
 
-#Visualize elevation data to determine whether it has the potential to inform segmentation
-ggplot(datseg) +
-  geom_point(aes(x=Index, y=R2n, colour=log(Altitude))) +
-  scale_colour_viridis_c()
-
-ggplot(datseg) +
-  geom_violin(aes(x=season, y=Altitude)) +
-  geom_jitter(aes(x=season, y=Altitude, colour=hour)) +
-  facet_wrap(~season, scales="free") +
-  scale_colour_viridis_c()
-
-#Yes, especially for winter foraging vs roosting
-#Explore bayesmove instead of HMMs
-#Try observation level segmentation instead of using foiegras and then segmenting
 #https://joshcullen.github.io/bayesmove/articles/Cluster-observations.html
 
 #2a. Fall migration----
@@ -118,7 +103,7 @@ dist.bin.lims<- quantile(filterfall$step, c(0,0.25,0.50,0.75,0.90,1), na.rm=T)  
 # Define bin number and limits for altitude
 alt.bin.lims<- quantile(filterfall$Altitude, c(0,0.25,0.50,0.75,0.90,1), na.rm=T)  #5 bins
 
-inputfall<- discrete_move_var(filterfall, lims = list(dist.bin.lims, angle.bin.lims), varIn = c("step","angle"), varOut = c("SL","TA"))
+discretefall<- discrete_move_var(filterfall, lims = list(dist.bin.lims, angle.bin.lims), varIn = c("step","angle"), varOut = c("SL","TA"))
 
 
 # Only retain id and discretized step length (SL), turning angle (TA)
@@ -179,12 +164,205 @@ z<- factor(dat.res$z[[MAP.iter]])
 levels(z)<- ord
 
 # Relabel factor levels
-inputfall$state<- ifelse(as.character(z) == 1, "Migration",
-                           ifelse(as.character(z) == 2, "Stopover",
-                                  ifelse(as.character(z) == 3, "???",
-                                         NA)))
+statesfall <- discretefall %>% 
+  st_as_sf(coords=c("x", "y"), crs=3857) %>% 
+  st_transform(crs=4326) %>% 
+  st_coordinates() %>% 
+  cbind(discretefall) %>% 
+  mutate(state = case_when(as.character(z) == 1 ~ "Migration",
+                           as.character(z) == 2 ~ "Stopover"))
+
+
+#Plot output
+
+#Get background map data
+whemi <- map_data("world", region=c("Canada", 
+                                    "USA", 
+                                    "Mexico",
+                                    "Guatemala", 
+                                    "Belize", 
+                                    "El Salvador",
+                                    "Honduras", 
+                                    "Nicaragua", 
+                                    "Costa Rica",
+                                    "Panama", 
+                                    "Jamaica", 
+                                    "Cuba", 
+                                    "The Bahamas",
+                                    "Haiti", 
+                                    "Dominican Republic", 
+                                    "Antigua and Barbuda",
+                                    "Dominica", 
+                                    "Saint Lucia", 
+                                    "Saint Vincent and the Grenadines", 
+                                    "Barbados",
+                                    "Grenada",
+                                    "Trinidad and Tobago",
+                                    "Colombia",
+                                    "Venezuela",
+                                    "Guyana",
+                                    "Suriname",
+                                    "Ecuador",
+                                    "Peru",
+                                    "Brazil",
+                                    "Bolivia",
+                                    "Paraguay",
+                                    "Chile",
+                                    "Argentina",
+                                    "Uruguay")) %>% 
+  dplyr::filter(!group%in%c(258:264))
+
+ggplot() +
+  geom_polygon(data=whemi, aes(x=long, y=lat, group=group), colour = "gray85", fill = "gray75", size=0.3) +
+  geom_path(data = statesfall, aes(x=X, y=Y), color="gray60", size=0.25) +
+  geom_point(data = statesfall, aes(X, Y, fill=state), size=3, pch=21, alpha=0.7) +
+  labs(x = "", y = "") +
+  xlim(c(-170, -30)) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 16),
+        strip.text = element_text(size = 14, face = "bold"),
+        panel.grid = element_blank()) +
+  guides(fill = guide_legend(label.theme = element_text(size = 12),
+                             title.theme = element_text(size = 14)))
+#mehhhh not sold on this output
+#should play with bins for step length
 
 #2b. Spring migration----
 
+#2bi. Wrangling----
+#Filter to spring migration points, prepare for bayesmove data prep
+datspring <- datseg %>% 
+  st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
+  st_transform(crs=3857) %>% 
+  st_coordinates() %>% 
+  cbind(datseg) %>% 
+  mutate(id=2217) %>% 
+  dplyr::filter(season=="springmig", hour==15) %>% 
+  dplyr::select(id, date, X, Y, Altitude) 
+
+#Calulate step lengths, turning angles, and time steps
+stepsspring <- prep_data(dat = datspring, coord.names = c("X","Y"), id = "id")
+
+#Visualize
+# View distributions of data streams
+hist(stepsspring$step)
+hist(stepsspring$angle)
+
+# Create list from data frame
+listspring<- df_to_list(dat = stepsspring, ind = "id")
+filterspring <- filter_time(dat=listspring, int = 86400) %>% 
+  bind_rows
+
+# Define bin number and limits for turning angles
+angle.bin.lims<- seq(from=-pi, to=pi, by=pi/4)  #8 bins
+
+# Define bin number and limits for step lengths
+dist.bin.lims<- quantile(filterspring$step, c(0,0.25,0.50,0.75,0.90,1), na.rm=T)  #5 bins
+
+# Define bin number and limits for altitude
+alt.bin.lims<- quantile(filterspring$Altitude, c(0,0.25,0.50,0.75,0.90,1), na.rm=T)  #5 bins
+
+discretespring<- discrete_move_var(filterspring, lims = list(dist.bin.lims, angle.bin.lims), varIn = c("step","angle"), varOut = c("SL","TA"))
+
+# Only retain id and discretized step length (SL), turning angle (TA)
+inputspring <- subset(discretespring, select = c(id, SL, TA))
+
+#2bii. Segmentation----
+
+set.seed(1)
+
+# Define model params
+alpha=0.1  #prior
+ngibbs=5000  #number of Gibbs sampler iterations
+nburn=ngibbs/2  #number of burn-in iterations
+nmaxclust=2  #number of maximum possible states (clusters) present
+
+# Run model
+dat.res<- bayesmove::cluster_obs(dat=inputspring, alpha=alpha, ngibbs=ngibbs, nmaxclust=nmaxclust,
+                                 nburn=nburn)
+
+# Inspect traceplot of log-likelihood
+plot(dat.res$loglikel, type = "l")
+
+# Determine the MAP estimate of the posterior
+MAP.iter<- get_MAP_internal(dat = dat.res$loglikel, nburn = nburn)
+
+# Determine the likely number of behavioral states (i.e., what are the fewest states that account for >= 90% of all observations?)
+theta<- dat.res$theta[MAP.iter,]
+names(theta)<- 1:length(theta)
+theta<- sort(theta, decreasing = TRUE)
+theta %>% cumsum() 
+
+# Store cluster order for plotting and behavioral state extraction
+ord<- as.numeric(names(theta))
+
+# Extract bin estimates for each possible state from the `phi` matrix of the model results
+behav.res<- get_behav_hist(dat = dat.res, nburn = nburn, ngibbs = ngibbs, nmaxclust = nmaxclust,
+                           var.names = c("Step Length","Turning Angle"), ord = ord,
+                           MAP.iter = MAP.iter)
+
+# Plot state-dependent distributions 
+ggplot(behav.res, aes(x = bin, y = prop, fill = as.factor(behav))) +
+  geom_bar(stat = 'identity') +
+  labs(x = "\nBin", y = "Proportion\n") +
+  theme_bw() +
+  theme(axis.title = element_text(size = 16),
+        axis.text.y = element_text(size = 14),
+        axis.text.x.bottom = element_text(size = 12),
+        strip.text = element_text(size = 14),
+        strip.text.x = element_text(face = "bold")) +
+  scale_fill_manual(values = c(viridis::viridis(3), "grey35","grey35",
+                               "grey35","grey35"), guide = FALSE) +
+  scale_y_continuous(breaks = c(0.00, 0.50, 1.00)) +
+  scale_x_continuous(breaks = 1:8) +
+  facet_grid(behav ~ var, scales = "free_x")
+
+# Extract MAP estimate of behavioral states
+z<- factor(dat.res$z[[MAP.iter]])
+levels(z)<- ord
+
+# Relabel factor levels
+statesspring <- discretespring %>% 
+  st_as_sf(coords=c("x", "y"), crs=3857) %>% 
+  st_transform(crs=4326) %>% 
+  st_coordinates() %>% 
+  cbind(discretespring) %>% 
+  mutate(state = case_when(as.character(z) == 1 ~ "Migration",
+                           as.character(z) == 2 ~ "Stopover"))
+
+#Plot output
+ggplot() +
+  geom_polygon(data=whemi, aes(x=long, y=lat, group=group), colour = "gray85", fill = "gray75", size=0.3) +
+  geom_path(data = statesspring, aes(x=X, y=Y), color="gray60", size=0.25) +
+  geom_point(data = statesspring, aes(X, Y, fill=state), size=1.5, pch=21, alpha=0.7) +
+  labs(x = "", y = "") +
+  xlim(c(-170, -30)) +
+  theme_bw() +
+  theme(axis.title = element_text(size = 16),
+        strip.text = element_text(size = 14, face = "bold"),
+        panel.grid = element_blank()) +
+  guides(fill = guide_legend(label.theme = element_text(size = 12),
+                             title.theme = element_text(size = 14)))
+
+#STEP 2. SEGMENT STOPOVER FROM MIGRATION - BAYESMOVE - WITH BREAKPOINTS####
+
+#https://joshcullen.github.io/bayesmove/articles/Segment-the-tracks.html
+#https://joshcullen.github.io/bayesmove/articles/Prepare-data-for-analysis.html
+#https://joshcullen.github.io/bayesmove/articles/Cluster-track-segments.html
+
 #STEP 3. SEGMENT FORAGING FROM ROOSTING FROM MIGRATION FOR BURST POINTS####
+
 #Do this separately for each season? Yes, because foraging behaviour could differ between seasons
+
+#Visualize elevation data to determine whether it has the potential to inform segmentation
+ggplot(datseg) +
+  geom_point(aes(x=Index, y=R2n, colour=log(Altitude))) +
+  scale_colour_viridis_c()
+
+ggplot(datseg) +
+  geom_violin(aes(x=season, y=Altitude)) +
+  geom_jitter(aes(x=season, y=Altitude, colour=hour)) +
+  facet_wrap(~season, scales="free") +
+  scale_colour_viridis_c()
+
+#Yes, especially for winter foraging vs roosting
