@@ -13,6 +13,7 @@ library(bayesmove) #for behavioural segmentation
 library(sf) #for gis
 library(furrr) #for segmentation in bayesmove
 library(purrr) #for segmentation in bayesmove
+library(moveHMM) #for behavioural segmentation
 
 options(scipen = 999)
 
@@ -63,17 +64,14 @@ dat <- read.csv("PinPoint 2217 2019-07-10 11-21-47.csv") %>%
 #Wrangle for as.traj function. Note filtered to just one point per day
 locs <- dat %>% 
   dplyr::select(RTC.date, RTC.time, Latitude, Longitude, Altitude)  %>% 
-  mutate(date=as.POSIXct(ymd(RTC.date)),
+  mutate(date=as.POSIXct(ymd_hms(paste0(RTC.date, RTC.time))),
          time=hms(RTC.time),
-         id=2217,
-         burst=1) %>% 
-  dplyr::filter(hour(time)==15)
+         id=2217)
 
 #Use as.traj function to get NSD
 traj <- as.ltraj(xy=locs[,c("Longitude", "Latitude")],
                  id=locs$id,
                  date=locs$date,
-                 burst=locs$burst,
                  proj4string = CRS("+proj=longlat +datum=WGS84"))
 #Look at it
 traj
@@ -83,25 +81,24 @@ head(traj[[1]])
 datseg <- dat %>% 
   left_join(as.data.frame(traj[[1]]) %>%
               mutate(date=as_date(date),
-                     doy=yday(date),
-                     index=row_number()) %>% 
+                     doy=yday(date)) %>% 
               dplyr::rename(Longitude=x, Latitude=y)) %>% 
   mutate(season=case_when(R2n<1 ~ "breed",
                           Longitude > -53.33 ~ "winter",
                           R2n>1 & Longitude < -53.33 & year(date)==2018 ~ "fallmig",
                           R2n>1 & Longitude < -53.3 & year(date)==2019 ~ "springmig"),
-         season=ifelse(is.na(season), "breed", season),
-         R2n=ifelse(is.na(R2n), 0, R2n),
+         date=as.POSIXct(ymd(RTC.date)),
          time=hms(RTC.time),
          hour=hour(time))
 
 #Check segmentation
 table(datseg$season)
+summary(datseg)
 
 #Visualize
 ggplot(datseg) +
-  geom_line(aes(x=index, y=R2n)) +
-  geom_point(aes(x=index, y=R2n, colour=season))
+  geom_line(aes(x=Index, y=R2n)) +
+  geom_point(aes(x=Index, y=R2n, colour=season))
 
 #Write out
 write.csv(datseg, "PinPoint2217_NSDsegmented.csv", row.names = FALSE)
@@ -146,10 +143,11 @@ dist.bin.lims<- quantile(filterfall$step, c(0,0.25,0.50,0.75,0.90,1), na.rm=T)  
 alt.bin.lims<- quantile(filterfall$Altitude, c(0,0.25,0.50,0.75,0.90,1), na.rm=T)  #5 bins
 
 discretefall<- discrete_move_var(filterfall, lims = list(dist.bin.lims, angle.bin.lims), varIn = c("step","angle"), varOut = c("SL","TA"))
+#discretefall<- discrete_move_var(filterfall, lims = list(dist.bin.lims, alt.bin.lims), varIn = c("step", "Altitude"), varOut = c("SL", "AL"))
 
-
-# Only retain id and discretized step length (SL), turning angle (TA)
+# Only retain id and discretized step length (SL), turning angle (TA), altitude
 inputfall <- subset(discretefall, select = c(id, SL, TA))
+#inputfall <- subset(discretefall, select = c(id, SL, AL))
 
 #2aii. Classification----
 
@@ -175,7 +173,7 @@ MAP.iter<- get_MAP_internal(dat = dat.res$loglikel, nburn = nburn)
 theta<- dat.res$theta[MAP.iter,]
 names(theta)<- 1:length(theta)
 theta<- sort(theta, decreasing = TRUE)
-theta %>% cumsum()  #first 3 states likely (represent 97.6% of all assigned states)
+theta %>% cumsum()
 
 # Store cluster order for plotting and behavioral state extraction
 ord<- as.numeric(names(theta))
@@ -228,6 +226,8 @@ ggplot() +
         panel.grid = element_blank()) +
   guides(fill = guide_legend(label.theme = element_text(size = 12),
                              title.theme = element_text(size = 14)))
+
+ggsave("FallMigration_DailyClassification_BayesMove.jpeg", width=8, height=6)
 #mehhhh not sold on this output
 #should play with bins for step length
 
@@ -405,8 +405,47 @@ segfall<- assign_tseg(dat = discretelistfall, brkpts = brkpts)
 head(tracks.seg)
 
 
-#2aiii. Classification----
+#STEP 2. SEGMENT STOPOVER FROM MIGRATION - MOVEHMM####
 
+#https://cran.r-project.org/web/packages/moveHMM/vignettes/moveHMM-guide.pdf
+
+#2a. Fall migration----
+#2ai. Wrangling----
+#Filter to fall migration points, prepare for bayesmove data prep
+datfall <- datseg %>% 
+  st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
+  st_transform(crs=3857) %>% 
+  st_coordinates() %>% 
+  cbind(datseg) %>% 
+  mutate(id=2217) %>% 
+  dplyr::filter(season=="fallmig", hour==15) %>% 
+  dplyr::select(id, date, X, Y, Altitude) %>% 
+  mutate(X=X/1000,
+         Y=Y/1000)
+
+prepfall <- prepData(datfall, type="UTM", coordNames = c("X", "Y"))
+
+plot(prepfall, compact=T)
+
+#2aii. Model----
+mu0 <- c(10,100) #(state1,state2) # mean step lengths for state 1 (stopover) and state 2 (migration)
+sigma0 <- c(1,300) #(state1,state2)
+stepPar0 <- c(mu0,sigma0)
+angleMean0 <- c(pi,0) # angle mean
+kappa0 <- c(1,1) # angle concentration
+anglePar0 <- c(angleMean0,kappa0)
+
+m <- fitHMM(data=prepfall,nbStates=2,stepPar0=stepPar0,
+            anglePar0=anglePar0)
+m
+CI(m)
+plot(m, plotCI=TRUE)
+
+#2aiii. Classify----
+states <- viterbi(m)
+sp <- stateProbs(m)
+
+plotStates(m,animals="Animal1")
 
 #STEP 3. SEGMENT FORAGING FROM ROOSTING FROM MIGRATION FOR BURST POINTS####
 
