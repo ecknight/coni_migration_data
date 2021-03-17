@@ -80,14 +80,13 @@ head(traj[[1]])
 #Segment per location for wintering grounds instead
 datseg <- dat %>% 
   left_join(as.data.frame(traj[[1]]) %>%
-              mutate(date=as_date(date),
-                     doy=yday(date)) %>% 
+              mutate(doy=yday(date)) %>% 
               dplyr::rename(Longitude=x, Latitude=y)) %>% 
   mutate(season=case_when(R2n<1 ~ "breed",
                           Longitude > -53.33 ~ "winter",
                           R2n>1 & Longitude < -53.33 & year(date)==2018 ~ "fallmig",
                           R2n>1 & Longitude < -53.3 & year(date)==2019 ~ "springmig"),
-         date=as.POSIXct(ymd(RTC.date)),
+         date=as.POSIXct(ymd_hms(paste0(RTC.date, RTC.time))),
          time=hms(RTC.time),
          hour=hour(time))
 
@@ -129,7 +128,8 @@ hist(stepsfall$step)
 hist(stepsfall$angle)
 
 # Create list from data frame
-listfall<- df_to_list(dat = stepsfall, ind = "id")
+roundfall <- round_track_time(dat = stepsfall, id = "id", int = 86400, tol = 600, time.zone = "UTC", units="secs")
+listfall<- df_to_list(dat = roundfall, ind = "id")
 filterfall <- filter_time(dat=listfall, int = 86400) %>% 
   bind_rows
 
@@ -212,7 +212,6 @@ statesfall <- discretefall %>%
   mutate(state = case_when(as.character(z) == 1 ~ "Migration",
                            as.character(z) == 2 ~ "Stopover"))
 
-
 #Plot output
 ggplot() +
   geom_polygon(data=whemi, aes(x=long, y=lat, group=group), colour = "gray85", fill = "gray75", size=0.3) +
@@ -228,8 +227,6 @@ ggplot() +
                              title.theme = element_text(size = 14)))
 
 ggsave("FallMigration_DailyClassification_BayesMove.jpeg", width=8, height=6)
-#mehhhh not sold on this output
-#should play with bins for step length
 
 #STEP 2. SEGMENT STOPOVER FROM MIGRATION - BAYESMOVE - WITH BREAKPOINTS####
 
@@ -332,8 +329,6 @@ plotStates(m,animals="Animal1")
 
 #STEP 3. SEGMENT FORAGING FROM ROOSTING FROM MIGRATION FOR BURST POINTS####
 
-#Do this separately for each season? Yes, because foraging behaviour could differ between seasons
-
 #Visualize elevation data to determine whether it has the potential to inform segmentation
 ggplot(datseg) +
   geom_point(aes(x=Index, y=R2n, colour=log(Altitude))) +
@@ -346,3 +341,146 @@ ggplot(datseg) +
   scale_colour_viridis_c()
 
 #Yes, especially for winter foraging vs roosting
+
+#I think need to do each day separately because are 10 days apart
+
+doys <- datseg %>% 
+  dplyr::filter(hour==4) %>% 
+  dplyr::select(doy, season) %>% 
+  unique()
+
+datseg.burst <- datseg %>% 
+  dplyr::filter(hour!=15,
+  doy %in% doys$doy)
+
+doys.list <- doys$doy
+
+for(i in 1:lenght(doys.list)){
+  
+  doy.i <- doys.list[i]
+  
+  #Filter to fall migration points, prepare for bayesmove data prep
+  dat.i <- datseg.burst %>% 
+    st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
+    st_transform(crs=3857) %>% 
+    st_coordinates() %>% 
+    cbind(datseg.burst) %>% 
+    mutate(id=2217) %>% 
+    dplyr::filter(doy==doy.i) %>% 
+    dplyr::select(id, date, X, Y, Altitude) 
+  
+  #Calulate step lengths, turning angles, and time steps
+  steps.i <- prep_data(dat = dat.i, coord.names = c("X","Y"), id = "id")
+  
+  #Visualize
+  # View distributions of data streams
+  hist(steps.i$step, breaks=20)
+  hist(steps.i$angle, breaks=20)
+  hist(steps.i$Altitude, breaks=20)
+  
+  # Create list from data frame
+  round.i <- round_track_time(dat = steps.i, id = "id", int = 3600, tol = 120, time.zone = "UTC", units="secs") %>% 
+    mutate(dt = ifelse(row_number()==nrow(steps.i), 3600, dt))
+  list.i<- df_to_list(dat = round.i, ind = "id")
+  filter.i <- filter_time(dat=list.i, int = 3600) %>% 
+    bind_rows
+  
+  # Define bin number and limits for turning angles
+  angle.bin.lims<- seq(from=-pi, to=pi, by=pi/4)  #8 bins
+  
+  # Define bin number and limits for step lengths
+  dist.bin.lims<- quantile(filter.i$step, c(0,0.05,0.10,0.05,0.75,1), na.rm=T)  #5 bins
+  
+  # Define bin number and limits for altitude
+  alt.bin.lims<- quantile(filter.i$Altitude, c(0,0.05,0.10,0.05,0.75,1), na.rm=T)  #5 bins
+  
+  discrete.i<- discrete_move_var(filter.i, lims = list(dist.bin.lims, angle.bin.lims, alt.bin.lims), varIn = c("step", "angle", "Altitude"), varOut = c("SL","TA", "AL"))
+  
+  # Only retain id and discretized step length (SL), turning angle (TA), altitude
+  input.i <- subset(discrete.i, select = c(id, SL, TA, AL))
+  
+  #2aii. Classification----
+  
+  set.seed(1)
+  
+  # Define model params
+  alpha=0.1  #prior
+  ngibbs=5000  #number of Gibbs sampler iterations
+  nburn=ngibbs/2  #number of burn-in iterations
+  nmaxclust=2  #number of maximum possible states (clusters) present
+  
+  # Run model
+  dat.res<- bayesmove::cluster_obs(dat=input.i, alpha=alpha, ngibbs=ngibbs, nmaxclust=nmaxclust,
+                                   nburn=nburn)
+  
+  # Inspect traceplot of log-likelihood
+  plot(dat.res$loglikel, type = "l")
+  
+  # Determine the MAP estimate of the posterior
+  MAP.iter<- get_MAP_internal(dat = dat.res$loglikel, nburn = nburn)
+  
+  # Determine the likely number of behavioral states (i.e., what are the fewest states that account for >= 90% of all observations?)
+  theta<- dat.res$theta[MAP.iter,]
+  names(theta)<- 1:length(theta)
+  theta<- sort(theta, decreasing = TRUE)
+  theta %>% cumsum()
+  
+  # Store cluster order for plotting and behavioral state extraction
+  ord<- as.numeric(names(theta))
+  
+  # Extract bin estimates for each possible state from the `phi` matrix of the model results
+  behav.res<- get_behav_hist(dat = dat.res, nburn = nburn, ngibbs = ngibbs, nmaxclust = nmaxclust,
+                             var.names = c("Step Length","Turning Angle", "Altitude"), ord = ord,
+                             MAP.iter = MAP.iter)
+  
+  # Plot state-dependent distributions 
+  ggplot(behav.res, aes(x = bin, y = prop, fill = as.factor(behav))) +
+    geom_bar(stat = 'identity') +
+    labs(x = "\nBin", y = "Proportion\n") +
+    theme_bw() +
+    theme(axis.title = element_text(size = 16),
+          axis.text.y = element_text(size = 14),
+          axis.text.x.bottom = element_text(size = 12),
+          strip.text = element_text(size = 14),
+          strip.text.x = element_text(face = "bold")) +
+    scale_fill_manual(values = c(viridis::viridis(3), "grey35","grey35",
+                                 "grey35","grey35"), guide = FALSE) +
+    scale_y_continuous(breaks = c(0.00, 0.50, 1.00)) +
+    scale_x_continuous(breaks = 1:8) +
+    facet_grid(behav ~ var, scales = "free_x")
+  
+  # Extract MAP estimate of behavioral states
+  z<- factor(dat.res$z[[MAP.iter]])
+  levels(z)<- ord
+  
+  # Relabel factor levels
+  states.i <- discrete.i %>% 
+    st_as_sf(coords=c("x", "y"), crs=3857) %>% 
+    st_transform(crs=4326) %>% 
+    st_coordinates() %>% 
+    cbind(discrete.i) %>% 
+    mutate(state = case_when(as.character(z) == 1 ~ "Migrate",
+                             as.character(z) == 2 ~ "Forage",
+                             as.character(z) == 3 ~ "Roost"))
+  
+  
+  #Plot output
+  ggplot() +
+    geom_path(data = states.i, aes(x=X, y=Y), color="gray60", size=0.25) +
+    geom_point(data = states.i, aes(X, Y, fill=state), size=3, pch=21, alpha=0.7) +
+    labs(x = "", y = "") +
+    theme_bw() +
+    theme(axis.title = element_text(size = 16),
+          strip.text = element_text(size = 14, face = "bold"),
+          panel.grid = element_blank()) +
+    guides(fill = guide_legend(label.theme = element_text(size = 12),
+                               title.theme = element_text(size = 14)))
+  
+  ggsave(paste0("Figures/BurstClassification/BurstClassification_BayesMove_",i,".jpeg"), width=8, height=6)
+  
+  
+}
+
+
+#mehhhh not sold on this output
+#should play with bins for step length
