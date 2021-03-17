@@ -14,6 +14,7 @@ library(sf) #for gis
 library(furrr) #for segmentation in bayesmove
 library(purrr) #for segmentation in bayesmove
 library(moveHMM) #for behavioural segmentation
+library(suncalc) #for time relative to sunset calculations
 
 options(scipen = 999)
 
@@ -55,7 +56,9 @@ whemi <- map_data("world", region=c("Canada",
                                     "Uruguay")) %>% 
   dplyr::filter(!group%in%c(258:264))
 
-#STEP 1. SEGMENT BY SEASON USING NET-SQUARED DISPLACEMENT####
+#STEP 1. WRANGLING####
+
+#1a. Segment by season----
 
 #Load in raw data & filter out pts without enough satellite
 dat <- read.csv("PinPoint 2217 2019-07-10 11-21-47.csv") %>% 
@@ -99,8 +102,19 @@ ggplot(datseg) +
   geom_line(aes(x=Index, y=R2n)) +
   geom_point(aes(x=Index, y=R2n, colour=season))
 
+#1b. Calculate time relative to sunset----
+datsun <- getSunlightTimes(data=datseg %>% 
+    rename(lat=Latitude, lon=Longitude) %>% 
+    mutate(date=as.Date(date))) %>% 
+  dplyr::select(sunrise, sunset) %>% 
+  cbind(datseg) %>% 
+  mutate(sethrs = as.numeric((sunset - date)/3600),
+         sethrs = ifelse(sethrs > 5, sethrs-24, sethrs),
+         risehrs = as.numeric((sunrise - date)/3600),
+         risehrs = ifelse(risehrs > 12, risehrs-24, risehrs),)
+
 #Write out
-write.csv(datseg, "PinPoint2217_NSDsegmented.csv", row.names = FALSE)
+write.csv(datsun, "PinPoint2217_NSDsegmented.csv", row.names = FALSE)
 
 #STEP 2. SEGMENT STOPOVER FROM MIGRATION - BAYESMOVE - POINT LEVEL####
 
@@ -110,16 +124,16 @@ write.csv(datseg, "PinPoint2217_NSDsegmented.csv", row.names = FALSE)
 
 #2ai. Wrangling----
 #Filter to fall migration points, prepare for bayesmove data prep
-datfall <- datseg %>% 
+datfall <- datsun %>% 
   st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
   st_transform(crs=3857) %>% 
   st_coordinates() %>% 
-  cbind(datseg) %>% 
+  cbind(datsun) %>% 
   mutate(id=2217) %>% 
   dplyr::filter(season=="fallmig", hour==15) %>% 
   dplyr::select(id, date, X, Y, Altitude) 
 
-#Calulate step lengths, turning angles, and time steps
+#Calculate step lengths, turning angles, and time steps
 stepsfall <- prep_data(dat = datfall, coord.names = c("X","Y"), id = "id")
 
 #Visualize
@@ -292,11 +306,11 @@ head(tracks.seg)
 #2a. Fall migration----
 #2ai. Wrangling----
 #Filter to fall migration points, prepare for bayesmove data prep
-datfall <- datseg %>% 
+datfall <- datsun %>% 
   st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
   st_transform(crs=3857) %>% 
   st_coordinates() %>% 
-  cbind(datseg) %>% 
+  cbind(datsun) %>% 
   mutate(id=2217) %>% 
   dplyr::filter(season=="fallmig", hour==15) %>% 
   dplyr::select(id, date, X, Y, Altitude) %>% 
@@ -330,11 +344,11 @@ plotStates(m,animals="Animal1")
 #STEP 3. SEGMENT FORAGING FROM ROOSTING FROM MIGRATION FOR BURST POINTS####
 
 #Visualize elevation data to determine whether it has the potential to inform segmentation
-ggplot(datseg) +
+ggplot(datsun) +
   geom_point(aes(x=Index, y=R2n, colour=log(Altitude))) +
   scale_colour_viridis_c()
 
-ggplot(datseg) +
+ggplot(datsun) +
   geom_violin(aes(x=season, y=Altitude)) +
   geom_jitter(aes(x=season, y=Altitude, colour=hour)) +
   facet_wrap(~season, scales="free") +
@@ -344,30 +358,32 @@ ggplot(datseg) +
 
 #I think need to do each day separately because are 10 days apart
 
-doys <- datseg %>% 
+doys <- datsun %>% 
   dplyr::filter(hour==4) %>% 
   dplyr::select(doy, season) %>% 
   unique()
 
-datseg.burst <- datseg %>% 
+datburst <- datsun %>% 
   dplyr::filter(hour!=15,
-  doy %in% doys$doy)
+                season=="winter",
+                doy %in% doys$doy)
 
-doys.list <- doys$doy
+doys.list <- unique(datburst$doy)
 
+#Bayesmove by point----
 for(i in 1:lenght(doys.list)){
   
   doy.i <- doys.list[i]
   
   #Filter to fall migration points, prepare for bayesmove data prep
-  dat.i <- datseg.burst %>% 
+  dat.i <- datburst %>% 
     st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
     st_transform(crs=3857) %>% 
     st_coordinates() %>% 
-    cbind(datseg.burst) %>% 
+    cbind(datburst) %>% 
     mutate(id=2217) %>% 
     dplyr::filter(doy==doy.i) %>% 
-    dplyr::select(id, date, X, Y, Altitude) 
+    dplyr::select(id, date, X, Y, Altitude, sethrs) 
   
   #Calulate step lengths, turning angles, and time steps
   steps.i <- prep_data(dat = dat.i, coord.names = c("X","Y"), id = "id")
@@ -377,6 +393,7 @@ for(i in 1:lenght(doys.list)){
   hist(steps.i$step, breaks=20)
   hist(steps.i$angle, breaks=20)
   hist(steps.i$Altitude, breaks=20)
+  hist(steps.i$sethrs, breaks=20)
   
   # Create list from data frame
   round.i <- round_track_time(dat = steps.i, id = "id", int = 3600, tol = 120, time.zone = "UTC", units="secs") %>% 
@@ -389,15 +406,19 @@ for(i in 1:lenght(doys.list)){
   angle.bin.lims<- seq(from=-pi, to=pi, by=pi/4)  #8 bins
   
   # Define bin number and limits for step lengths
-  dist.bin.lims<- quantile(filter.i$step, c(0,0.05,0.10,0.05,0.75,1), na.rm=T)  #5 bins
+  dist.bin.lims<- quantile(filter.i$step, c(0,0.05,0.10,0.5,0.75,1), na.rm=T)  #5 bins
   
   # Define bin number and limits for altitude
-  alt.bin.lims<- quantile(filter.i$Altitude, c(0,0.05,0.10,0.05,0.75,1), na.rm=T)  #5 bins
+  alt.bin.lims<- quantile(filter.i$Altitude, c(0,0.05,0.10,0.5,0.75,1), na.rm=T)  #5 bins
   
-  discrete.i<- discrete_move_var(filter.i, lims = list(dist.bin.lims, angle.bin.lims, alt.bin.lims), varIn = c("step", "angle", "Altitude"), varOut = c("SL","TA", "AL"))
+  set.bin.lims <- quantile(filter.i$sethrs, c(0,0.1,0.25,0.50,0.75,0.9,1), na.rm=T)
+  
+#  discrete.i<- discrete_move_var(filter.i, lims = list(dist.bin.lims, angle.bin.lims, alt.bin.lims, set.bin.lims), varIn = c("step", "angle", "Altitude", "sethrs"), varOut = c("SL","TA", "AL", "HR"))
+  discrete.i<- discrete_move_var(filter.i, lims = list(dist.bin.lims, alt.bin.lims, set.bin.lims), varIn = c("step", "Altitude", "sethrs"), varOut = c("SL", "AL", "HR"))
   
   # Only retain id and discretized step length (SL), turning angle (TA), altitude
-  input.i <- subset(discrete.i, select = c(id, SL, TA, AL))
+#  input.i <- subset(discrete.i, select = c(id, SL, TA, AL, HR))
+  input.i <- subset(discrete.i, select = c(id, SL, AL, HR))
   
   #2aii. Classification----
   
@@ -430,7 +451,7 @@ for(i in 1:lenght(doys.list)){
   
   # Extract bin estimates for each possible state from the `phi` matrix of the model results
   behav.res<- get_behav_hist(dat = dat.res, nburn = nburn, ngibbs = ngibbs, nmaxclust = nmaxclust,
-                             var.names = c("Step Length","Turning Angle", "Altitude"), ord = ord,
+                             var.names = c("Step Length","Turning Angle", "Altitude", "Time since\nsunset"), ord = ord,
                              MAP.iter = MAP.iter)
   
   # Plot state-dependent distributions 
@@ -481,6 +502,60 @@ for(i in 1:lenght(doys.list)){
   
 }
 
+#MoveHMM----
 
-#mehhhh not sold on this output
-#should play with bins for step length
+doys <- datsun %>% 
+  dplyr::filter(hour==4) %>% 
+  dplyr::select(doy, season) %>% 
+  unique()
+
+datburst <- datsun %>% 
+  dplyr::filter(hour!=15,
+                season=="winter",
+                doy %in% doys$doy)
+
+doys.list <- unique(datburst$doy)
+
+for(i in 1:length(doys.list)){
+  
+  doy.i <- doys.list[i]
+  
+  #2ai. Wrangling----
+  #Filter to fall migration points, prepare for bayesmove data prep
+  dat.i <- datburst %>% 
+    st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
+    st_transform(crs=3857) %>% 
+    st_coordinates() %>% 
+    cbind(datburst) %>% 
+    mutate(id=2217) %>% 
+    dplyr::filter(doy==doy.i) %>% 
+    dplyr::select(id, date, X, Y, Altitude, sethrs) %>% 
+    mutate(X=X/1000,
+           Y=Y/1000)
+  
+  prep.i <- prepData(dat.i, type="UTM", coordNames = c("X", "Y"))
+  
+  plot(prep.i, compact=T)
+  
+  #2aii. Model----
+  mu0 <- c(1,10) #(state1,state2) # mean step lengths for state 1 (stopover) and state 2 (migration)
+  sigma0 <- c(1,300) #(state1,state2)
+  stepPar0 <- c(mu0,sigma0)
+  angleMean0 <- c(pi,0) # angle mean
+  kappa0 <- c(1,1) # angle concentration
+  anglePar0 <- c(angleMean0,kappa0)
+  formula <- ~Altitude + sethrs
+  
+  m <- fitHMM(data=prep.i,nbStates=2,stepPar0=stepPar0,anglePar0=anglePar0, formula=formula)
+  m
+  CI(m)
+  plot(m, plotCI=TRUE)
+  
+  #2aiii. Classify----
+  states <- viterbi(m)
+  sp <- stateProbs(m)
+  
+  plotStates(m,animals="Animal1")
+  
+  
+}
