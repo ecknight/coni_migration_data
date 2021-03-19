@@ -15,6 +15,8 @@ library(furrr) #for segmentation in bayesmove
 library(purrr) #for segmentation in bayesmove
 library(moveHMM) #for behavioural segmentation
 library(suncalc) #for time relative to sunset calculations
+library(moveNT) #for network analysis
+library(meanShiftR) #for density cluster analysis
 
 options(scipen = 999)
 
@@ -101,6 +103,12 @@ summary(datseg)
 ggplot(datseg) +
   geom_line(aes(x=Index, y=R2n)) +
   geom_point(aes(x=Index, y=R2n, colour=season))
+
+ggplot(subset(datseg, season %in% c("springmig", "fallmig"))) +
+  geom_path(aes(x=Longitude, y=Latitude)) +
+  geom_point(aes(x=Longitude, y=Latitude, colour=doy), size=4) +
+  scale_colour_viridis_c() +
+  facet_wrap(~season)
 
 #1b. Calculate time relative to sunset----
 datsun <- getSunlightTimes(data=datseg %>% 
@@ -341,6 +349,78 @@ sp <- stateProbs(m)
 
 plotStates(m,animals="Animal1")
 
+#STEP 2. SEGMENT STOPOVER FROM MIGRATION - MOVENT####
+library(devtools)
+install_github("BastilleRousseau/moveNT")
+
+#2ai. Wrangle----
+datfall <- datsun %>% 
+  st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
+  st_transform(crs=3857) %>% 
+  st_coordinates() %>% 
+  cbind(datsun) %>% 
+  mutate(id=2217) %>% 
+  dplyr::filter(season=="fallmig", hour==15) %>% 
+  dplyr::select(id, X, Y, date)
+
+#make an ltraj
+traj <- as.ltraj(xy=datfall[,c("X", "Y")],
+                 id=datfall$id,
+                 date=datfall$date,
+                 proj4string = CRS("+init=epsg:3857"))
+adj <- traj2adj(traj, res=500)
+dim(adj[[1]])
+plot(adj[[2]])
+plot(adj[[3]])
+
+stk <- adj2stack(adj, grph=F)
+graphmet(stk)
+cv(val(stk, 4))
+
+#THIS ISN"T WORKING YET####
+
+#STEP 2. SEGMENT STOPOVER FROM MIGRATION - MEANSHIFT####
+
+#2a. Fall----
+
+#2ai. Wrangle----
+datfall <- datsun %>% 
+  st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
+  st_transform(crs=3857) %>% 
+  st_coordinates() %>% 
+  cbind(datsun) %>% 
+  mutate(id=2217) %>% 
+  dplyr::filter(season=="fallmig", hour==15)
+
+#2aii. Mean shift classification----
+mat.fall1 <- matrix(datfall$X)
+mat.fall2 <- matrix(datfall$Y)
+mat.fall <- cbind(mat.fall1, mat.fall2)
+
+shiftfall <- meanShift(mat.fall,
+                             algorithm="KDTREE",
+                             bandwidth=c(1,1))
+
+clustfall <- datfall %>% 
+  mutate(cluster = shiftfall[[1]]) %>% 
+  group_by(cluster) %>% 
+  mutate(count=n()) %>% 
+  ungroup() %>% 
+  mutate(stopover = ifelse(count > 1, 1, 0))
+
+table(clustfall$cluster)
+
+ggplot() +
+  geom_polygon(data=whemi, aes(x=long, y=lat, group=group), colour = "gray85", fill = "gray75", size=0.3) +
+  geom_path(data=clustfall, aes(x=Longitude, y=Latitude)) +
+  geom_point(data=clustfall, aes(x=Longitude, y=Latitude, fill=factor(stopover)), pch=21, size=3, alpha=0.7) +
+  labs(x = "", y = "") +
+  xlim(c(-170, -30)) +
+  theme_bw() +
+  scale_fill_manual(values=c("orange", "blue"))
+
+
+
 #STEP 3. SEGMENT FORAGING FROM ROOSTING FROM MIGRATION FOR BURST POINTS####
 
 #Visualize elevation data to determine whether it has the potential to inform segmentation
@@ -451,7 +531,7 @@ for(i in 1:lenght(doys.list)){
   
   # Extract bin estimates for each possible state from the `phi` matrix of the model results
   behav.res<- get_behav_hist(dat = dat.res, nburn = nburn, ngibbs = ngibbs, nmaxclust = nmaxclust,
-                             var.names = c("Step Length","Turning Angle", "Altitude", "Time since\nsunset"), ord = ord,
+                             var.names = c("Step Length", "Altitude", "Time since\nsunset"), ord = ord,
                              MAP.iter = MAP.iter)
   
   # Plot state-dependent distributions 
