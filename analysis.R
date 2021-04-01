@@ -146,8 +146,28 @@ stepsfall <- prep_data(dat = datfall, coord.names = c("X","Y"), id = "id")
 
 #Visualize
 # View distributions of data streams
-hist(stepsfall$step)
-hist(stepsfall$angle)
+#Step length
+q <- quantile(stepsfall$step, seq(0,1,0.1), na.rm=T) %>% 
+  data.frame() 
+q$quantile <- paste0("percent", rownames(q))
+colnames(q) <- c("value", "quantile")
+
+#Look at jenks breaks
+j <- getJenksBreaks(stepsfall$step, 1) #not useful
+
+ggplot(stepsfall) +
+  geom_histogram(aes(x=step)) +
+  geom_vline(data=q, aes(xintercept=value, colour=quantile)) +
+  geom_vline(aes(xintercept=j[1]), linetype="dashed")
+
+ggplot(stepsfall) +
+  geom_histogram(aes(x=log(step))) +
+  geom_vline(data=q, aes(xintercept=log(value), colour=quantile)) +
+  geom_vline(aes(xintercept=log(j[1])), linetype="dashed")
+
+#Step angle
+ggplot(stepsfall) +
+  geom_histogram(aes(x=angle))
 
 # Create list from data frame
 roundfall <- round_track_time(dat = stepsfall, id = "id", int = 86400, tol = 600, time.zone = "UTC", units="secs")
@@ -159,16 +179,18 @@ filterfall <- filter_time(dat=listfall, int = 86400) %>%
 angle.bin.lims<- seq(from=-pi, to=pi, by=pi/4)  #8 bins
 
 # Define bin number and limits for step lengths
-dist.bin.lims<- quantile(filterfall$step, c(0,0.25,0.50,0.75,0.90,1), na.rm=T)  #5 bins
+dist.bin.lims<- quantile(filterfall$step, c(0,0.1,0.25,0.50,0.75,1), na.rm=T) #6 bins
 
 # Define bin number and limits for altitude
-alt.bin.lims<- quantile(filterfall$Altitude, c(0,0.25,0.50,0.75,0.90,1), na.rm=T)  #5 bins
+alt.bin.lims<- quantile(filterfall$Altitude, c(0,0.25,0.50,0.75,0.90,1), na.rm=T)
 
 discretefall<- discrete_move_var(filterfall, lims = list(dist.bin.lims, angle.bin.lims), varIn = c("step","angle"), varOut = c("SL","TA"))
+#discretefall<- discrete_move_var(filterfall, lims = list(dist.bin.lims), varIn = c("step"), varOut = c("SL"))
 #discretefall<- discrete_move_var(filterfall, lims = list(dist.bin.lims, alt.bin.lims), varIn = c("step", "Altitude"), varOut = c("SL", "AL"))
 
 # Only retain id and discretized step length (SL), turning angle (TA), altitude
 inputfall <- subset(discretefall, select = c(id, SL, TA))
+#inputfall <- subset(discretefall, select = c(id, SL))
 #inputfall <- subset(discretefall, select = c(id, SL, AL))
 
 #2aii. Classification----
@@ -258,7 +280,7 @@ ggsave("FallMigration_DailyClassification_BayesMove.jpeg", width=8, height=6)
 
 #2a. Fall migration----
 
-#Run step 2bi above first
+#Run step 2ai above first
 
 #2aii. Segmentation----
 
@@ -271,7 +293,8 @@ alpha<- 1
 # Set number of iterations for the Gibbs sampler
 ngibbs<- 10000
 # Set the number of bins used to discretize each data stream
-nbins<- c(5,8)
+nbins<- c(6,8)
+#nbins<- c(6)
 
 future::plan(multisession)  #run all MCMC chains in parallel
 #refer to future::plan() for more details
@@ -368,16 +391,21 @@ traj <- as.ltraj(xy=datfall[,c("X", "Y")],
                  id=datfall$id,
                  date=datfall$date,
                  proj4string = CRS("+init=epsg:3857"))
-adj <- traj2adj(traj, res=500)
+adj <- traj2adj(traj, res=100000)
 dim(adj[[1]])
 plot(adj[[2]])
 plot(adj[[3]])
 
 stk <- adj2stack(adj, grph=F)
+plot(stk)
 graphmet(stk)
 cv(val(stk, 4))
 
-#THIS ISN"T WORKING YET####
+clust2<-clustnet(stk, id=3, nclust=2, grph=F)
+summary(clust2[[1]])
+plot(clust2[[2]])
+
+#Nope
 
 #STEP 2. SEGMENT STOPOVER FROM MIGRATION - MEANSHIFT####
 
@@ -419,6 +447,55 @@ ggplot() +
   theme_bw() +
   scale_fill_manual(values=c("orange", "blue"))
 
+ggsave("MeanShift_Map_Fall.jpeg", width=15, height=22, unit="in")
+
+ggplot(clustfall) +
+  geom_line(aes(x=doy, y=lag(dist))) +
+  geom_point(aes(x=doy, y=lag(dist), colour=factor(stopover)))
+
+#2b. Spring----
+
+#2ai. Wrangle----
+datspring <- datsun %>% 
+  st_as_sf(crs=4326, coords=c("Longitude", "Latitude")) %>% 
+  st_transform(crs=3857) %>% 
+  st_coordinates() %>% 
+  cbind(datsun) %>% 
+  mutate(id=2217) %>% 
+  dplyr::filter(season=="springmig", hour==15)
+
+#2aii. Mean shift classification----
+mat.spring1 <- matrix(datspring$X)
+mat.spring2 <- matrix(datspring$Y)
+mat.spring <- cbind(mat.spring1, mat.spring2)
+
+shiftspring <- meanShift(mat.spring,
+                       algorithm="KDTREE",
+                       bandwidth=c(1,1))
+
+clustspring <- datspring %>% 
+  mutate(cluster = shiftspring[[1]]) %>% 
+  group_by(cluster) %>% 
+  mutate(count=n()) %>% 
+  ungroup() %>% 
+  mutate(stopover = ifelse(count > 1, 1, 0))
+
+table(clustspring$cluster)
+
+ggplot() +
+  geom_polygon(data=whemi, aes(x=long, y=lat, group=group), colour = "gray85", fill = "gray75", size=0.3) +
+  geom_path(data=clustspring, aes(x=Longitude, y=Latitude)) +
+  geom_point(data=clustspring, aes(x=Longitude, y=Latitude, fill=factor(stopover)), pch=21, size=3, alpha=0.7) +
+  labs(x = "", y = "") +
+  xlim(c(-170, -30)) +
+  theme_bw() +
+  scale_fill_manual(values=c("orange", "blue"))
+
+ggsave("MeanShift_Map_Spring.jpeg", width=15, height=22, unit="in")
+
+ggplot(clustspring) +
+  geom_line(aes(x=doy, y=lag(dist))) +
+  geom_point(aes(x=doy, y=lag(dist), colour=factor(stopover)))
 
 
 #STEP 3. SEGMENT FORAGING FROM ROOSTING FROM MIGRATION FOR BURST POINTS####
