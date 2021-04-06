@@ -1,25 +1,16 @@
 #title: Behavioural segmentation of Common Nighthawk migration data
 #author: Elly C. Knight
-#created: March 4, 2021
-
-#remotes::install_github("joshcullen/bayesmove")
+#created: April 6, 2021
 
 #PREAMBLE####
 
 library(tidyverse) #for data wrangling
 library(lubridate) #for date manipulation
 library(adehabitatLT) #for NSD calculation
-library(bayesmove) #for behavioural segmentation
 library(sf) #for gis
-library(furrr) #for segmentation in bayesmove
-library(purrr) #for segmentation in bayesmove
-library(moveHMM) #for behavioural segmentation
 library(suncalc) #for time relative to sunset calculations
-library(moveNT) #for network analysis
-library(meanShiftR) #for density cluster analysis
 
 options(scipen = 999)
-
 
 #Get background map data
 whemi <- map_data("world", region=c("Canada", 
@@ -122,4 +113,4 @@ datsun <- getSunlightTimes(data=datseg %>%
          risehrs = ifelse(risehrs > 12, risehrs-24, risehrs),)
 
 #Write out
-write.csv(datsun, "PinPoint2217_NSDsegmented.csv", row.names = FALSE)
+write.csv(datsun, "00_PinPoint2217_SeasonClassified.csv", row.names = FALSE)
