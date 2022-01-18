@@ -134,8 +134,10 @@ ggsave("MeanShift_Map_Spring.jpeg", width=15, height=22, unit="in")
 
 #2c. Put together----
 datstop <- rbind(clustfall, clustspring) %>% 
-  dplyr::select(Latitude, Longitude, stopover) %>% 
+  dplyr::select(Latitude, Longitude, cluster, stopover, count) %>% 
   full_join(datsun) %>% 
-  mutate(stopover=ifelse(is.na(stopover), 0, stopover))
+  mutate(stopover=ifelse(is.na(stopover), 0, stopover),
+         cluster=ifelse(stopover==0, NA, cluster),
+         count=ifelse(stopover==0, NA, count))
 
 write.csv(datstop, "01_PinPoint2217_StopoverClassified.csv", row.names = FALSE)
